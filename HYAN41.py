@@ -1,36 +1,57 @@
-# hybrid_dnn_eqic_with_prediction.py
-
 import streamlit as st
 import pandas as pd
 import numpy as np
 from sklearn.preprocessing import MinMaxScaler
-from sklearn.metrics import silhouette_score, accuracy_score, mean_absolute_error, mean_squared_error, calinski_harabasz_score, davies_bouldin_score
+from sklearn.metrics import silhouette_score, accuracy_score, calinski_harabasz_score, davies_bouldin_score
 from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
-from sklearn.linear_model import LinearRegression
-from sklearn.ensemble import RandomForestClassifier
 import matplotlib.pyplot as plt
 from itertools import product
-import seaborn as sns
 import warnings
 warnings.filterwarnings("ignore")
 
 # -------------------- Utility Functions --------------------
 
-def preprocess_df(df, target_column):
+def preprocess_df(df, target_column=None):
     df = df.copy()
+
+    # Drop datetime columns
+    df = df.drop(columns=df.select_dtypes(include=['datetime64', 'datetime']).columns, errors='ignore')
+
+    # Convert object columns to string for safe encoding
     for col in df.select_dtypes(include=['object']).columns:
         df[col] = df[col].astype(str)
-    df = df.drop(columns=df.select_dtypes(include=['datetime64']).columns, errors='ignore')
-    df = df.loc[:, df.nunique() > 1]
-    high_card_cols = [col for col in df.columns if df[col].nunique() > 30 and col != target_column]
-    df = df.drop(columns=high_card_cols)
+
+    # Drop columns with only one unique value
+    df = df.loc[:, df.nunique(dropna=False) > 1]
+
+    # Separate out the target temporarily
+    target = df[target_column] if target_column and target_column in df.columns else None
+
+    # Drop the target column from processing
+    if target_column and target_column in df.columns:
+        df = df.drop(columns=[target_column])
+
+    # Handle categorical variables
     cat_cols = df.select_dtypes(include=['object', 'category']).columns
-    cat_cols = [c for c in cat_cols if c != target_column]
     df = pd.get_dummies(df, columns=cat_cols, drop_first=True)
-    for col in df.columns:
-        if col != target_column:
-            df[col] = df[col].fillna(df[col].median())
+
+    # Fill missing values with median
+    df = df.fillna(df.median(numeric_only=True))
+
+    # Reattach target column
+    if target_column and target is not None:
+        df[target_column] = target
+
+    # Final fallback if no columns left
+    usable_cols = [col for col in df.columns if col != target_column]
+    if not usable_cols:
+        fallback = ['open', 'high', 'low', 'close', 'volume', 'VWAP']
+        fallback_cols = [col for col in fallback if col in df.columns]
+        if not fallback_cols:
+            raise ValueError("No features available after preprocessing. Please check your dataset.")
+        return df[fallback_cols + ([target_column] if target_column else [])]
+
     return df
 
 def normalize_data(data):
@@ -143,19 +164,19 @@ if uploaded_file:
     split_idx = int(len(df) * train_ratio)
     train_df = df.iloc[:split_idx].copy()
 
-    st.markdown("### 🎯 Clustering + Prediction Setup")
-    target_column = st.selectbox("Select target column (optional, for prediction)", ["None"] + list(df.columns))
+    st.markdown("### 🎯 Clustering Setup")
+    target_column = st.selectbox("Select target column (optional, for evaluation only)", ["None"] + list(df.columns))
     target_column = None if target_column == "None" else target_column
     n_clusters = st.slider("Number of clusters", 2, 10, 3)
 
-    if st.button("🚀 Start Clustering + Prediction"):
-        train_clean = preprocess_df(train_df, target_column) if target_column else df.copy()
-        features = [col for col in train_clean.columns if col != target_column] if target_column else train_clean.columns
-
-        if len(features) == 0:
-            st.error("🚫 No features available for clustering after preprocessing.")
+    if st.button("🚀 Start Clustering"):
+        try:
+            train_clean = preprocess_df(train_df, target_column)
+        except ValueError as e:
+            st.error(f"🚫 {str(e)}")
             st.stop()
 
+        features = [col for col in train_clean.columns if col != target_column]
         scaler = MinMaxScaler()
         train_scaled = scaler.fit_transform(train_clean[features])
 
@@ -172,26 +193,13 @@ if uploaded_file:
         st.write(f"Calinski-Harabasz Score: {calinski_harabasz_score(train_scaled, labels):.2f}")
         st.write(f"Davies-Bouldin Score: {davies_bouldin_score(train_scaled, labels):.2f}")
 
-        # ----- Optional Prediction Model -----
         if target_column:
-            if train_df[target_column].dtype in [np.float64, np.int64]:
-                model = LinearRegression()
-                model.fit(train_clean[features], train_df[target_column])
-                preds = model.predict(train_clean[features])
-                train_clean['Predicted'] = preds
-                mae = mean_absolute_error(train_df[target_column], preds)
-                mse = mean_squared_error(train_df[target_column], preds)
-                st.metric("MAE", f"{mae:.4f}")
-                st.metric("MSE", f"{mse:.4f}")
-            else:
-                clf = RandomForestClassifier()
-                clf.fit(train_clean[features], train_df[target_column])
-                preds = clf.predict(train_clean[features])
-                train_clean['Predicted'] = preds
-                acc = accuracy_score(train_df[target_column], preds)
-                st.metric("Classification Accuracy", f"{acc:.2%}")
+            if train_clean[target_column].nunique() <= 10:
+                cluster_map = train_clean.groupby('Cluster')[target_column].agg(lambda x: x.mode().iloc[0]).to_dict()
+                train_clean['Predicted'] = [cluster_map.get(l, np.nan) for l in labels]
+                acc = accuracy_score(train_clean[target_column], train_clean['Predicted'])
+                st.metric("Cluster Match Accuracy", f"{acc:.2%}")
 
-        # ----- PCA and t-SNE Tabs -----
         st.markdown("### 📌 PCA / t-SNE Visualization")
         tab1, tab2 = st.tabs(["PCA", "t-SNE"])
 
@@ -219,4 +227,4 @@ if uploaded_file:
         st.dataframe(pd.DataFrame(centroids, columns=features).astype(str))
 
         csv = train_clean.to_csv(index=False).encode('utf-8', errors='ignore')
-        st.download_button("📥 Download Clustered Data with Prediction", csv, file_name="clustered_output.csv")
+        st.download_button("📥 Download Clustered Data", csv, file_name="clustered_output.csv")
