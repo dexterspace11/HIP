@@ -1,159 +1,144 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import seaborn as sns
 import matplotlib.pyplot as plt
-from sklearn.preprocessing import LabelEncoder, MinMaxScaler
-from sklearn.impute import SimpleImputer
-from sklearn.metrics import mean_squared_error, silhouette_score
-from sklearn.decomposition import PCA
-from sklearn.cluster import KMeans
+import seaborn as sns
 from datetime import datetime
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import MinMaxScaler
 
-# ---------------- Memory Structures -------------------
-class EpisodicMemory:
-    def __init__(self):
-        self.episodes = {}
+# --- Quantum-Inspired Hybrid Unit (Neuron) ---
+class HybridUnit:
+    def __init__(self, pattern, learning_rate=0.1):
+        self.pattern = np.array(pattern)
+        self.learning_rate = learning_rate
+        self.usage_count = 0
+        self.created_at = datetime.now()
 
-    def store(self, timestamp, pattern):
-        self.episodes[timestamp] = pattern
+    def quantum_similarity(self, input_pattern):
+        diff = np.abs(input_pattern - self.pattern)
+        euclidean = np.sqrt(np.sum(diff ** 2))
+        return np.exp(-2.0 * euclidean) + 0.5 / (1 + 0.9 * euclidean)
 
+    def adapt(self, input_pattern):
+        self.pattern += self.learning_rate * (input_pattern - self.pattern)
+        self.usage_count += 1
+
+# --- Semantic Memory for Feature Associations ---
 class SemanticMemory:
     def __init__(self):
-        self.associations = {}
+        self.relationships = {}  # (i,j) -> avg co-activation
 
-    def update(self, feature_pair, strength):
-        key = tuple(sorted(feature_pair))
-        self.associations[key] = self.associations.get(key, 0.0) + strength
+    def update(self, pattern):
+        for i in range(len(pattern)):
+            for j in range(i+1, len(pattern)):
+                key = tuple(sorted((i, j)))
+                if key not in self.relationships:
+                    self.relationships[key] = 0
+                self.relationships[key] += pattern[i] * pattern[j]
 
-class HybridImputerPredictor:
+# --- Episodic Memory ---
+class EpisodicMemory:
     def __init__(self):
-        self.memory = EpisodicMemory()
-        self.semantics = SemanticMemory()
-        self.imputer = SimpleImputer(strategy='mean')
-        self.scaler = MinMaxScaler()
-        self.trained = False
+        self.episodes = []
 
-    def fit(self, df):
-        self.feature_names = df.columns
-        df_encoded = self._encode_categoricals(df.copy())
-        df_imputed = pd.DataFrame(self.imputer.fit_transform(df_encoded), columns=df.columns)
-        df_scaled = pd.DataFrame(self.scaler.fit_transform(df_imputed), columns=df.columns)
+    def store(self, input_vector):
+        self.episodes.append((datetime.now(), input_vector))
 
-        for i, row in df_scaled.iterrows():
-            self.memory.store(str(i), row.values)
-            for i in range(len(row)):
-                for j in range(i + 1, len(row)):
-                    strength = np.abs(row[i] - row[j])
-                    self.semantics.update((df.columns[i], df.columns[j]), 1 - strength)
+# --- HybridImputerPredictor Core ---
+class HybridImputerPredictor:
+    def __init__(self, quantum_threshold=0.6):
+        self.units = []
+        self.quantum_threshold = quantum_threshold
+        self.semantic_memory = SemanticMemory()
+        self.episodic_memory = EpisodicMemory()
 
-        self.trained = True
-        self.train_data = df
-        self.train_scaled = df_scaled
+    def _match_unit(self, input_vector):
+        best_similarity = 0
+        best_unit = None
+        for unit in self.units:
+            sim = unit.quantum_similarity(input_vector)
+            if sim > best_similarity:
+                best_similarity = sim
+                best_unit = unit
+        return best_unit, best_similarity
 
-    def predict_missing(self, df):
-        df_encoded = self._encode_categoricals(df.copy())
-        df_imputed = pd.DataFrame(self.imputer.transform(df_encoded), columns=df.columns)
-        df_scaled = pd.DataFrame(self.scaler.transform(df_imputed), columns=df.columns)
+    def learn(self, input_vector):
+        self.episodic_memory.store(input_vector)
+        unit, similarity = self._match_unit(input_vector)
+        if unit and similarity >= self.quantum_threshold:
+            unit.adapt(input_vector)
+        else:
+            self.units.append(HybridUnit(input_vector))
+        self.semantic_memory.update(input_vector)
 
-        predictions = []
-        for i, row in df_scaled.iterrows():
-            if row.isnull().any():
-                pred = row.copy()
-                for idx, val in enumerate(row):
-                    if np.isnan(val):
-                        pred[idx] = self._predict_column_value(idx, row)
-                predictions.append(pred)
-            else:
-                predictions.append(row)
-        return pd.DataFrame(self.scaler.inverse_transform(predictions), columns=df.columns)
+    def predict_missing(self, input_vector):
+        nan_indices = np.where(np.isnan(input_vector))[0]
+        if len(nan_indices) == 0:
+            return input_vector
+        unit, similarity = self._match_unit(input_vector)
+        if not unit:
+            return input_vector
+        imputed = input_vector.copy()
+        for idx in nan_indices:
+            imputed[idx] = unit.pattern[idx]
+        return imputed
 
-    def _predict_column_value(self, idx, row):
-        known_mask = ~np.isnan(row)
-        similarities = []
-        for mem in self.memory.episodes.values():
-            sim = -np.linalg.norm(row[known_mask] - mem[known_mask])
-            similarities.append(sim)
-        best_idx = np.argmax(similarities)
-        best_match = list(self.memory.episodes.values())[best_idx]
-        return best_match[idx]
-
-    def _encode_categoricals(self, df):
-        for col in df.select_dtypes(include='object'):
-            df[col] = LabelEncoder().fit_transform(df[col].astype(str))
-        return df
+    def explain_relationships(self, feature_names):
+        sorted_rel = sorted(self.semantic_memory.relationships.items(), key=lambda x: -x[1])
+        return [(f"{feature_names[i]} & {feature_names[j]}", score) for ((i, j), score) in sorted_rel[:10]]
 
 # ---------------- Streamlit Dashboard -------------------
 st.set_page_config(layout="wide")
-st.title("🧠 Hybrid Brain-like Predictor and Analyzer")
+st.title("🧠 Quantum-Inspired Brain-like Predictor")
 
-st.sidebar.markdown("### Upload Your Excel File")
+st.sidebar.header("Upload Excel Dataset")
 file = st.sidebar.file_uploader("Choose a file", type=['xlsx'])
 
 if file:
     sheet_names = pd.ExcelFile(file).sheet_names
-    sheet = st.sidebar.selectbox("Choose sheet", sheet_names)
-    raw_df = pd.read_excel(file, sheet_name=sheet)
+    sheet = st.sidebar.selectbox("Select sheet", sheet_names)
+    df_raw = pd.read_excel(file, sheet_name=sheet)
 
-    st.markdown("### 📊 Raw Data Preview")
-    st.dataframe(raw_df.head())
+    st.markdown("### Raw Data Preview")
+    st.dataframe(df_raw.head())
 
-    st.markdown("---")
-    st.markdown("### 🧹 Data Preprocessing")
-    df_clean = raw_df.copy()
-    df_clean = df_clean.dropna(axis=1, how='all')
-    df_clean = df_clean.select_dtypes(include=[np.number, 'object'])
+    df = df_raw.select_dtypes(include=[np.number]).copy()
+    feature_names = df.columns.tolist()
+    imputer = SimpleImputer(strategy='mean')
+    scaler = MinMaxScaler()
+
+    df_complete = df.dropna()
+    df_scaled = scaler.fit_transform(imputer.fit_transform(df_complete))
 
     predictor = HybridImputerPredictor()
+    for row in df_scaled:
+        predictor.learn(row)
 
-    if st.button("Train Brain with Complete Data"):
-        df_train = df_clean.dropna()
-        predictor.fit(df_train)
-        st.success("Training complete!")
+    st.success("Model trained with complete rows!")
 
-        st.markdown("### 🧠 Memory Evolution")
-        mem_df = pd.DataFrame(predictor.memory.episodes).T
-        st.dataframe(mem_df.head())
+    st.markdown("### 🧬 Top Semantic Relationships")
+    relationships = predictor.explain_relationships(feature_names)
+    for rel, score in relationships:
+        st.write(f"{rel}: {score:.4f}")
 
-        st.markdown("### 📈 Semantic Relationships")
-        assoc_df = pd.DataFrame(predictor.semantics.associations.items(), columns=["Feature Pair", "Strength"])
-        assoc_df = assoc_df.sort_values(by="Strength", ascending=False)
-        st.dataframe(assoc_df.head(10))
+    st.markdown("### 🔮 Predict Missing Values")
+    df_test = df[df.isna().any(axis=1)].copy()
+    if df_test.empty:
+        st.info("No missing values detected for prediction.")
+    else:
+        df_test_imputed = imputer.transform(df_test)
+        df_test_scaled = scaler.transform(df_test_imputed)
+        predictions = [predictor.predict_missing(row) for row in df_test_scaled]
+        df_predicted = pd.DataFrame(scaler.inverse_transform(predictions), columns=feature_names)
 
-    if predictor.trained:
-        st.markdown("---")
-        st.markdown("### 🔍 Predict Missing Values")
-        df_test = df_clean[df_clean.isna().any(axis=1)]
-        if df_test.empty:
-            st.info("No rows with missing values to predict.")
-        else:
-            predicted = predictor.predict_missing(df_test)
-            st.dataframe(predicted.head())
+        st.markdown("#### Predicted Values")
+        st.dataframe(df_predicted.head())
 
-        st.markdown("### 📊 Dataset Statistics")
-        st.markdown("#### Complete Data")
-        st.dataframe(df_train.describe())
+    st.markdown("### 📊 Heatmap of Complete Data")
+    fig, ax = plt.subplots(figsize=(10, 6))
+    sns.heatmap(df_complete.corr(), annot=True, cmap="coolwarm", ax=ax)
+    st.pyplot(fig)
 
-        st.markdown("#### Test Data with Predictions")
-        st.dataframe(predicted.describe())
-
-        st.markdown("---")
-        st.markdown("### 🧬 Correlation Heatmap")
-        corr = df_train.corr(numeric_only=True)
-        fig, ax = plt.subplots(figsize=(10, 6))
-        sns.heatmap(corr, annot=True, fmt=".2f", cmap="coolwarm", ax=ax)
-        st.pyplot(fig)
-
-        st.markdown("---")
-        st.markdown("### 🔗 Cluster Analysis")
-        pca = PCA(n_components=2)
-        X_pca = pca.fit_transform(predictor.train_scaled)
-        kmeans = KMeans(n_clusters=3, random_state=42).fit(X_pca)
-        silhouette = silhouette_score(X_pca, kmeans.labels_)
-
-        fig2, ax2 = plt.subplots()
-        scatter = ax2.scatter(X_pca[:, 0], X_pca[:, 1], c=kmeans.labels_, cmap='viridis')
-        ax2.set_title(f"KMeans Clusters (Silhouette Score = {silhouette:.2f})")
-        st.pyplot(fig2)
 else:
-    st.info("Please upload an Excel file to begin analysis.")
+    st.info("Upload an Excel file to begin.")
