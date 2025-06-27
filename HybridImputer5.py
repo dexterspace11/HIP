@@ -1,5 +1,3 @@
-# hybrid_eqic_streamlit.py
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -9,7 +7,7 @@ from sklearn.decomposition import PCA
 import matplotlib.pyplot as plt
 from itertools import product
 
-# ---------------------------- Utility Functions -----------------------------
+# ------------------- Utility Functions ------------------- #
 
 def preprocess_df(df, target_column):
     df = df.copy()
@@ -35,7 +33,7 @@ def normalize_data(data):
 
 def calculate_distance(point, centroid, alpha, beta, gamma, weights):
     weighted_diff = weights * np.abs(point - centroid)
-    dist = np.sqrt(np.sum(weighted_diff ** 2))
+    dist = np.sqrt(np.sum(weighted_diff**2))
     exp_term = np.exp(-alpha * dist)
     inv_term = beta / (1 + gamma * dist)
     return exp_term + inv_term
@@ -83,20 +81,17 @@ def enhanced_quantum_clustering(data, n_clusters=2, alpha=2.0, beta=0.5, gamma=0
     idx = np.random.choice(len(data), n_clusters, replace=False)
     centroids = data[idx]
     weights = np.ones(data.shape[1])
-
-    for _ in range(max_iter):
+    for it in range(max_iter):
         clusters = [[] for _ in range(n_clusters)]
         for x in data:
             dists = [calculate_distance(x, c, alpha, beta, gamma, weights) for c in centroids]
             clusters[np.argmax(dists)].append(x)
-
-        weights = update_dimension_weights(clusters, data)
+        if it > 0:
+            weights = update_dimension_weights(clusters, data)
         new_centroids = update_centroids(clusters, centroids, gamma, kappa)
-
         if np.max(np.abs(new_centroids - centroids)) < tol:
             break
         centroids = new_centroids
-
     labels = assign_clusters(data, centroids, weights, alpha, beta, gamma)
     return labels, centroids, weights
 
@@ -118,83 +113,80 @@ def hyperparameter_search(data, n_clusters, param_grid):
             best_labels = labels
     return best_labels, best_params, best_score
 
-# ----------------------------- Streamlit UI --------------------------------
+# -------------------- Streamlit App --------------------- #
 
-st.set_page_config(page_title="Hybrid DNN-EQIC Predictor", layout="wide")
-st.title("🧠 Hybrid DNN-EQIC Quantum-Inspired Clustering & Prediction")
-uploaded_file = st.file_uploader("Upload Dataset (Excel/CSV)", type=["csv", "xlsx"])
+st.title("🧠 Hybrid DNN-EQIC Clustering & Prediction (Quantum-Inspired)")
 
+uploaded_file = st.file_uploader("📁 Upload your Excel or CSV file", type=["xlsx", "csv"])
 if uploaded_file:
-    df = pd.read_excel(uploaded_file) if uploaded_file.name.endswith(".xlsx") else pd.read_csv(uploaded_file)
-    st.write("Dataset Preview:", df.head())
+    df = pd.read_csv(uploaded_file) if uploaded_file.name.endswith(".csv") else pd.read_excel(uploaded_file)
+    df.columns = df.columns.astype(str)
+    st.write("### 📝 Dataset Preview")
+    st.dataframe(df.head())
 
-    col_id = st.text_input("Optional: Column for Range-Based Split (e.g., 'id')", value="")
-    if col_id and col_id in df.columns:
-        range_start = st.number_input("Start of Training Range", value=0)
-        range_end = st.number_input("End of Training Range", value=int(len(df)*0.7))
-        train_df = df[df[col_id].between(range_start, range_end)].copy()
-        test_df = df[~df[col_id].between(range_start, range_end)].copy()
+    st.subheader("⚙️ Train/Test Split")
+    manual_split = st.radio("Would you like to manually define the training range?", ["No (automatic split)", "Yes (manual range)"])
+
+    if manual_split == "Yes (manual range)":
+        index_column = st.selectbox("Select the index column for range definition", df.columns)
+        start = st.number_input("Start row index for training set", min_value=0, max_value=len(df)-1, value=0)
+        end = st.number_input("End row index for training set", min_value=0, max_value=len(df)-1, value=len(df)//2)
+        train_df = df[(df[index_column] >= df[index_column].iloc[int(start)]) & (df[index_column] <= df[index_column].iloc[int(end)])]
+        test_df = df[~df.index.isin(train_df.index)]
     else:
-        split_ratio = st.slider("Train/Test Split Ratio", 0.1, 0.9, 0.7)
-        train_df = df.sample(frac=split_ratio, random_state=42)
+        train_df = df.sample(frac=0.7, random_state=42)
         test_df = df.drop(train_df.index)
 
-    target_col = st.selectbox("Select Target Variable to Predict", df.columns)
-    threshold = st.slider("Threshold (for binary targets)", 0.0, 1.0, 0.5)
-    n_clusters = st.slider("Number of Clusters", 2, 10, 3)
+    target_column = st.selectbox("🎯 Select the target column to predict", options=df.columns)
 
-    df_clean = preprocess_df(df, target_col)
-    features = [f for f in df_clean.columns if f != target_col]
-    scaled = MinMaxScaler().fit_transform(df_clean[features])
+    if target_column:
+        cluster_count = st.slider("🔢 Number of Clusters", min_value=2, max_value=10, value=3)
+        threshold = 0.5
+        if df[target_column].nunique() <= 2:
+            threshold = st.slider("🎚️ Threshold (for binary targets)", 0.0, 1.0, 0.5)
 
-    st.info("Running Quantum-Inspired Clustering with Memory...")
-    param_grid = {'alpha': [1.0, 2.0], 'beta': [0.3, 0.5], 'gamma': [0.7, 0.9], 'kappa': [0.05, 0.1]}
-    labels, best_params, score = hyperparameter_search(scaled, n_clusters, param_grid)
-    st.success(f"Best Silhouette Score: {score:.4f}")
-    st.json(best_params)
+        df_clean = preprocess_df(train_df, target_column)
+        features = [col for col in df_clean.columns if col != target_column]
+        scaler = MinMaxScaler()
+        data_scaled = scaler.fit_transform(df_clean[features])
 
-    labels, centroids, weights = enhanced_quantum_clustering(scaled, n_clusters, **best_params)
-    df_clean['Cluster'] = labels
+        st.info("🔍 Tuning hyperparameters...")
+        param_grid = {'alpha': [1.0, 2.0], 'beta': [0.3, 0.5], 'gamma': [0.7, 0.9], 'kappa': [0.05, 0.1]}
+        labels, best_params, best_score = hyperparameter_search(data_scaled, cluster_count, param_grid)
+        st.success(f"✅ Best Silhouette Score: {best_score:.4f}")
+        st.json(best_params)
 
-    # Mapping Clusters to Predicted Target
-    t = df_clean[target_col]
-    if t.nunique() <= 2:
-        cluster_map = df_clean.groupby('Cluster')[target_col].mean().to_dict()
-        df_clean['Predicted'] = df_clean['Cluster'].map(lambda x: int(cluster_map[x] > threshold))
-    elif t.dtype == float or t.dtype == int:
-        cluster_map = df_clean.groupby('Cluster')[target_col].mean().to_dict()
-        df_clean['Predicted'] = df_clean['Cluster'].map(cluster_map)
-    else:
-        cluster_map = df_clean.groupby('Cluster')[target_col].agg(lambda x: x.mode()[0] if not x.mode().empty else np.nan).to_dict()
-        df_clean['Predicted'] = df_clean['Cluster'].map(cluster_map)
+        labels, centroids, weights = enhanced_quantum_clustering(data_scaled, cluster_count, **best_params)
+        df_clean["Cluster"] = labels
 
-    # Cluster Statistics
-    st.subheader("🔍 Cluster Summary")
-    st.write(df_clean.groupby('Cluster')[features + ['Predicted']].agg(['mean', 'std']))
-    st.write("Cluster Sizes:", df_clean['Cluster'].value_counts())
+        cluster_map = df_clean.groupby("Cluster")[target_column].mean().to_dict()
+        df_clean["Predicted"] = [cluster_map[c] if df[target_column].nunique() > 2 else int(cluster_map[c] > threshold) for c in labels]
 
-    # Centroid Insights
-    st.subheader("🧠 Centroid Analysis")
-    centroid_df = pd.DataFrame(centroids, columns=features)
-    st.dataframe(centroid_df)
+        # Test data
+        test_clean = preprocess_df(test_df, target_column)
+        test_scaled = scaler.transform(test_clean[features])
+        test_labels = assign_clusters(test_scaled, centroids, weights, **{k: best_params[k] for k in ['alpha', 'beta', 'gamma']})
+        test_clean["Cluster"] = test_labels
+        test_clean["Predicted"] = [cluster_map.get(c, np.nan) if df[target_column].nunique() > 2 else int(cluster_map.get(c, 0) > threshold) for c in test_labels]
 
-    # PCA Visualization
-    try:
-        st.subheader("📊 PCA Cluster Visualization")
+        # Combine
+        final_df = pd.concat([df_clean, test_clean], axis=0)
+        st.subheader("📊 Cluster and Prediction Results")
+        st.dataframe(final_df[[target_column, 'Cluster', 'Predicted'] + features].head(10))
+
+        st.subheader("📌 Cluster Summary")
+        st.dataframe(final_df.groupby("Cluster")[features + ['Predicted']].agg(['mean', 'std']))
+
+        st.subheader("📉 PCA Visualization")
         pca = PCA(n_components=2)
-        reduced = pca.fit_transform(scaled)
+        reduced = pca.fit_transform(scaler.transform(final_df[features]))
         fig, ax = plt.subplots()
-        for i in range(n_clusters):
-            idx = df_clean['Cluster'] == i
-            ax.scatter(reduced[idx, 0], reduced[idx, 1], label=f"Cluster {i}", alpha=0.6)
+        for i in range(cluster_count):
+            ax.scatter(reduced[final_df["Cluster"] == i, 0], reduced[final_df["Cluster"] == i, 1], label=f"Cluster {i}", alpha=0.6)
+        ax.set_title("PCA Projection")
         ax.legend()
-        ax.set_title("PCA of Clusters")
         st.pyplot(fig)
-    except:
-        st.warning("PCA could not be plotted.")
 
-    # Final Output
-    st.subheader("📥 Download Results")
-    df_final = pd.concat([df.reset_index(drop=True), df_clean[['Cluster', 'Predicted']]], axis=1)
-    st.dataframe(df_final.head(10))
-    st.download_button("Download CSV", data=df_final.to_csv(index=False), file_name="final_output.csv", mime="text/csv")
+        # Export
+        csv = final_df.to_csv(index=False).encode("utf-8")
+        st.download_button("📥 Download Results", data=csv, file_name="hybrid_dnn_eqic_output.csv", mime="text/csv")
