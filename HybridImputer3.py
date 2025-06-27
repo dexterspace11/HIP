@@ -1,4 +1,3 @@
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -101,16 +100,18 @@ def preprocess_df(df, target_column=None):
         exclude_cols = [target_column]
     else:
         exclude_cols = []
+    # Drop constant columns
     constant_cols = [col for col in df.columns if df[col].nunique() <= 1]
     df = df.drop(columns=constant_cols)
+    # Drop high-cardinality columns (likely identifiers)
     high_card_cols = [col for col in df.columns if df[col].nunique() > 30 and col not in exclude_cols]
     df = df.drop(columns=high_card_cols)
-
+    # One-hot encode categorical columns
     cat_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
     cat_cols = [col for col in cat_cols if col not in exclude_cols]
     if cat_cols:
         df = pd.get_dummies(df, columns=cat_cols, drop_first=True)
-
+    # Fill NaNs with median
     for col in df.columns:
         if col not in exclude_cols:
             df[col] = df[col].fillna(df[col].median())
@@ -119,7 +120,7 @@ def preprocess_df(df, target_column=None):
 if mode == "Train Model":
     st.subheader("🧪 Train Clustering Model")
     uploaded_file = st.file_uploader("Upload training Excel or CSV", type=["csv", "xlsx"])
-
+    
     if uploaded_file:
         if uploaded_file.name.endswith(".csv"):
             df = pd.read_csv(uploaded_file)
@@ -130,8 +131,17 @@ if mode == "Train Model":
         target_column = st.selectbox("Select target column to predict", df.columns)
         n_clusters = st.slider("Number of Clusters", 2, 10, 3)
 
-        target_type = "binary" if df[target_column].nunique() == 2 else "continuous"
-        threshold = 0.5 if target_type == "binary" else None
+        target_unique = df[target_column].dropna().unique()
+        if df[target_column].dtype == 'O' or len(target_unique) <= 10:
+            if len(target_unique) == 2:
+                target_type = 'binary'
+                threshold = st.slider("Probability threshold for predicting '1'", 0.0, 1.0, 0.5)
+            else:
+                target_type = 'categorical'
+                threshold = None
+        else:
+            target_type = 'continuous'
+            threshold = None
 
         df_clean = preprocess_df(df, target_column)
         features = [col for col in df_clean.columns if col != target_column]
@@ -149,6 +159,7 @@ if mode == "Train Model":
         best_params = None
         best_labels = None
 
+        st.write("Running hyperparameter search...")
         for alpha, beta, gamma, kappa in product(param_grid['alpha'], param_grid['beta'], param_grid['gamma'], param_grid['kappa']):
             labels, _, _ = enhanced_quantum_clustering(data_scaled, n_clusters, alpha, beta, gamma, kappa)
             try:
@@ -169,9 +180,13 @@ if mode == "Train Model":
         if target_type == 'binary':
             cluster_target_map = df_clean.groupby('Cluster')[target_column].mean().to_dict()
             df_clean['Predicted'] = [int(cluster_target_map[label] > threshold) for label in labels]
-        else:
+        elif target_type == 'continuous':
             cluster_target_map = df_clean.groupby('Cluster')[target_column].mean().to_dict()
             df_clean['Predicted'] = [cluster_target_map[label] for label in labels]
+        else:  # categorical
+            cluster_target_mode = df_clean.groupby('Cluster')[target_column].agg(lambda x: x.mode().iloc[0] if not x.mode().empty else np.nan)
+            cluster_target_map = cluster_target_mode.to_dict()
+            df_clean['Predicted'] = [cluster_target_mode[label] for label in labels]
 
         model = {
             'centroids': centroids,
@@ -202,7 +217,7 @@ if mode == "Train Model":
 elif mode == "Predict New Data":
     st.subheader("🔮 Predict Using Saved Model")
     uploaded_file = st.file_uploader("Upload new data file", type=["csv", "xlsx"])
-
+    
     if uploaded_file and os.path.exists("models/saved_model.joblib"):
         model = joblib.load("models/saved_model.joblib")
         centroids = model['centroids']
@@ -219,13 +234,29 @@ elif mode == "Predict New Data":
         else:
             df_new = pd.read_excel(uploaded_file)
 
-        df_new = preprocess_df(df_new)
+        df_new = df_new.drop(columns=df_new.select_dtypes(include=['datetime64']).columns)
+        # One-hot encode categorical cols in new data if any
+        cat_cols = df_new.select_dtypes(include=['object', 'category']).columns.tolist()
+        if cat_cols:
+            df_new = pd.get_dummies(df_new, columns=cat_cols, drop_first=True)
         for col in features:
             if col not in df_new.columns:
                 df_new[col] = 0
 
+        # Fill missing numeric cols with median
+        for col in features:
+            df_new[col] = df_new[col].fillna(df_new[col].median())
+
         data_scaled = scaler.transform(df_new[features])
-        labels = assign_clusters(data_scaled, centroids, weights, **best_params)
+        # Fix: pass only alpha, beta, gamma to assign_clusters
+        labels = assign_clusters(
+            data_scaled,
+            centroids,
+            weights,
+            best_params['alpha'],
+            best_params['beta'],
+            best_params['gamma']
+        )
         df_new['Cluster'] = labels
 
         def predict_target(cluster_label):
