@@ -2,46 +2,33 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from sklearn.preprocessing import MinMaxScaler
-from sklearn.metrics import silhouette_score
+from sklearn.metrics import silhouette_score, accuracy_score, mean_absolute_error
 from sklearn.decomposition import PCA
 import matplotlib.pyplot as plt
 from itertools import product
 
-# ------------- Utility Functions -------------------
+# -------------------- Utility Functions --------------------
 
 def preprocess_df(df, target_column):
     df = df.copy()
-
-    # Force object-type columns to strings to avoid pyarrow issues
     for col in df.select_dtypes(include=['object']).columns:
         df[col] = df[col].astype(str)
-
-    # Drop datetime columns
     df = df.drop(columns=df.select_dtypes(include=['datetime64']).columns)
-
-    # Drop constant columns
     df = df.loc[:, df.nunique() > 1]
-
-    # Drop high-cardinality columns (likely IDs), except target
     high_card_cols = [col for col in df.columns if df[col].nunique() > 30 and col != target_column]
     df = df.drop(columns=high_card_cols)
-
-    # One-hot encode categorical (except target)
     cat_cols = df.select_dtypes(include=['object', 'category']).columns
     cat_cols = [c for c in cat_cols if c != target_column]
     df = pd.get_dummies(df, columns=cat_cols, drop_first=True)
-
-    # Fill NaNs with median (exclude target)
     for col in df.columns:
         if col != target_column:
             df[col] = df[col].fillna(df[col].median())
-
     return df
 
 def normalize_data(data):
     mean = np.mean(data, axis=0)
     std = np.std(data, axis=0)
-    std[std == 0] = 1e-8
+    std = np.where(std == 0, 1e-8, std)
     return (data - mean) / std
 
 def calculate_distance(point, centroid, alpha, beta, gamma, weights):
@@ -65,14 +52,11 @@ def update_dimension_weights(clusters, data):
             mean_var = np.mean(var) if np.mean(var) != 0 else epsilon
             weights *= var / mean_var
     weights = np.nan_to_num(weights, nan=1.0, posinf=1.0, neginf=1.0)
-    
     sum_weights = np.sum(weights)
     if sum_weights < epsilon:
-        # Avoid division by zero by assigning uniform weights
         weights = np.ones_like(weights) / len(weights)
     else:
         weights = weights / sum_weights
-    
     return weights
 
 def update_centroids(clusters, centroids, gamma, kappa):
@@ -138,154 +122,102 @@ def hyperparameter_search(data, n_clusters, param_grid):
             best_labels = labels
     return best_labels, best_params, best_score
 
+# -------------------- Streamlit UI --------------------
 
-# ------------- Streamlit UI -------------------
+st.set_page_config(page_title="Hybrid DNN-EQIC Clustering", layout="wide")
+st.title("🧠 Hybrid DNN-EQIC Clustering and Prediction (Quantum-Inspired)")
 
-st.title("🔮 Hybrid Clustering Predictor (Quantum-Inspired)")
-
-uploaded_file = st.file_uploader("Upload Excel or CSV file", type=["xlsx", "csv"])
+uploaded_file = st.file_uploader("📤 Upload your dataset (CSV/XLSX)", type=["csv", "xlsx"])
 
 if uploaded_file:
-    if uploaded_file.name.endswith('.csv'):
-        df = pd.read_csv(uploaded_file)
-    else:
-        df = pd.read_excel(uploaded_file)
-
+    df = pd.read_csv(uploaded_file) if uploaded_file.name.endswith(".csv") else pd.read_excel(uploaded_file)
     df.columns = df.columns.astype(str)
-    st.write("Dataset Preview:")
-    st.dataframe(df.astype(str).head())
+    st.dataframe(df.head().astype(str))
 
-    auto_split = st.radio("Automatically split train/test dataset?", options=["Yes", "No"], index=0)
-
-    train_df = None
-    test_df = None
+    st.markdown("### ⚙️ Train/Test Configuration")
+    auto_split = st.radio("Auto-split train/test?", ["Yes", "No"], index=0)
 
     if auto_split == "No":
-        split_column = st.selectbox("Select column for train/test split reference", options=df.columns)
-        min_val = int(df[split_column].min())
-        max_val = int(df[split_column].max())
-        train_start = st.number_input(f"Train range start (inclusive) for column '{split_column}'", min_value=min_val, max_value=max_val, value=min_val)
-        train_end = st.number_input(f"Train range end (inclusive) for column '{split_column}'", min_value=min_val, max_value=max_val, value=min_val + (max_val - min_val)//3)
-        
-        # Split based on column and range
+        split_column = st.selectbox("Reference column for split", df.columns)
+        min_val, max_val = int(df[split_column].min()), int(df[split_column].max())
+        train_start = st.number_input("Train Start", min_value=min_val, max_value=max_val, value=min_val)
+        train_end = st.number_input("Train End", min_value=min_val, max_value=max_val, value=min_val+10)
         train_df = df[(df[split_column] >= train_start) & (df[split_column] <= train_end)]
         test_df = df[~((df[split_column] >= train_start) & (df[split_column] <= train_end))]
-        st.write(f"Train dataset shape: {train_df.shape}")
-        st.write(f"Test dataset shape: {test_df.shape}")
     else:
-        train_ratio = st.slider("Train set ratio (for auto split)", min_value=0.1, max_value=0.9, value=0.7)
-        train_size = int(len(df)*train_ratio)
-        train_df = df.iloc[:train_size]
-        test_df = df.iloc[train_size:]
-        st.write(f"Train dataset shape: {train_df.shape}")
-        st.write(f"Test dataset shape: {test_df.shape}")
+        train_ratio = st.slider("Train ratio", 0.1, 0.9, 0.7)
+        split_idx = int(len(df) * train_ratio)
+        train_df, test_df = df.iloc[:split_idx], df.iloc[split_idx:]
 
-    target_column = st.selectbox("Select Target Column to Predict", options=df.columns)
+    st.markdown("### 🎯 Prediction Setup")
+    target_column = st.selectbox("Select target column", df.columns)
+    threshold = st.slider("Binary threshold (if applicable)", 0.0, 1.0, 0.5)
+    n_clusters = st.slider("Number of clusters", 2, 10, 3)
 
-    threshold = st.slider("Threshold for Binary Prediction (only used if target is binary)", 0.0, 1.0, 0.5)
-
-    n_clusters = st.slider("Select Number of Clusters", 2, 6, 3)
-
-    start_analysis = st.button("Start Analysis")
-
-    if start_analysis:
-        # Preprocess train and test separately (using train target)
+    if st.button("🚀 Start Analysis"):
         train_clean = preprocess_df(train_df, target_column)
         test_clean = preprocess_df(test_df, target_column)
-
-        # Align columns in test to train (handle one-hot columns)
         test_clean = test_clean.reindex(columns=train_clean.columns, fill_value=0)
 
         features = [col for col in train_clean.columns if col != target_column]
-
-        # Scale data
         scaler = MinMaxScaler()
         train_scaled = scaler.fit_transform(train_clean[features])
         test_scaled = scaler.transform(test_clean[features])
 
-        # Hyperparameter tuning on train
-        param_grid = {
-            'alpha': [1.0, 2.0],
-            'beta': [0.3, 0.5],
-            'gamma': [0.7, 0.9],
-            'kappa': [0.05, 0.1]
-        }
-
-        st.info("⏳ Searching for best hyperparameters on train data...")
-        labels_train, best_params, best_score = hyperparameter_search(train_scaled, n_clusters=n_clusters, param_grid=param_grid)
-        st.success(f"✅ Best Silhouette Score (Train): {best_score:.4f}")
+        st.info("Tuning hyperparameters...")
+        param_grid = {'alpha': [1.0, 2.0], 'beta': [0.3, 0.5], 'gamma': [0.7, 0.9], 'kappa': [0.05, 0.1]}
+        _, best_params, score = hyperparameter_search(train_scaled, n_clusters, param_grid)
+        st.success(f"Best Silhouette Score: {score:.4f}")
         st.json(best_params)
 
-        # Final clustering on train
-        labels_train, centroids, weights = enhanced_quantum_clustering(train_scaled, n_clusters=n_clusters, **best_params)
-        train_clean["Cluster"] = labels_train
-
-        # Predict clusters on test
+        labels_train, centroids, weights = enhanced_quantum_clustering(train_scaled, n_clusters, **best_params)
+        train_clean['Cluster'] = labels_train
         labels_test = assign_clusters(test_scaled, centroids, weights, **best_params)
-        test_clean["Cluster"] = labels_test
+        test_clean['Cluster'] = labels_test
 
-        # Map clusters to target for prediction
-        target_type = 'binary' if train_clean[target_column].dropna().nunique() == 2 else (
-                      'categorical' if train_clean[target_column].dtype == 'O' or train_clean[target_column].nunique() <= 10 else 'continuous')
+        # Predict target from cluster assignment
+        target_type = 'binary' if train_clean[target_column].nunique() == 2 else ('categorical' if train_clean[target_column].dtype == 'O' else 'continuous')
 
-        def cluster_to_pred(df):
+        def predict_from_cluster(df):
+            map_func = df.groupby('Cluster')[target_column].mean().to_dict() if target_type in ['binary', 'continuous'] else df.groupby('Cluster')[target_column].agg(lambda x: x.mode().iloc[0] if not x.mode().empty else np.nan).to_dict()
             if target_type == 'binary':
-                cluster_map = df.groupby('Cluster')[target_column].mean().to_dict()
-                return [int(cluster_map.get(l, 0) > threshold) for l in df['Cluster']]
-            elif target_type == 'continuous':
-                cluster_map = df.groupby('Cluster')[target_column].mean().to_dict()
-                return [cluster_map.get(l, np.nan) for l in df['Cluster']]
-            else:
-                cluster_map = df.groupby('Cluster')[target_column].agg(lambda x: x.mode().iloc[0] if not x.mode().empty else np.nan).to_dict()
-                return [cluster_map.get(l, np.nan) for l in df['Cluster']]
+                return [int(map_func[l] > threshold) for l in df['Cluster']]
+            return [map_func.get(l, np.nan) for l in df['Cluster']]
 
-        train_clean['Predicted'] = cluster_to_pred(train_clean)
-        test_clean['Predicted'] = cluster_to_pred(test_clean)
+        train_clean['Predicted'] = predict_from_cluster(train_clean)
+        test_clean['Predicted'] = predict_from_cluster(test_clean)
 
-        # Show analysis for train and test separately
-        st.subheader("📈 Train Dataset Cluster Analysis")
-        st.write(train_clean.groupby('Cluster').agg({target_column: ['mean', 'std', 'count']}))
-        st.write("Cluster counts:")
-        st.write(train_clean['Cluster'].value_counts())
+        # Evaluation
+        if target_type == 'binary':
+            acc = accuracy_score(train_clean[target_column], train_clean['Predicted'])
+            st.metric("Train Accuracy", f"{acc:.2%}")
+        elif target_type == 'continuous':
+            mae = mean_absolute_error(train_clean[target_column], train_clean['Predicted'])
+            st.metric("Train MAE", f"{mae:.4f}")
 
-        st.subheader("📉 Test Dataset Cluster Analysis")
-        st.write(test_clean.groupby('Cluster').agg({target_column: ['mean', 'std', 'count']}))
-        st.write("Cluster counts:")
-        st.write(test_clean['Cluster'].value_counts())
-
-        # PCA visualization combined train+test
-        st.subheader("🌀 PCA Projection of Combined Train and Test")
-        combined_scaled = np.vstack([train_scaled, test_scaled])
-        combined_labels = np.concatenate([labels_train, labels_test])
+        # PCA
+        st.markdown("### 🧬 PCA Cluster Projection")
+        all_scaled = np.vstack([train_scaled, test_scaled])
+        all_labels = np.concatenate([labels_train, labels_test])
         pca = PCA(n_components=2)
-        combined_pca = pca.fit_transform(combined_scaled)
-
-        fig, ax = plt.subplots(figsize=(8,6))
-        for cluster in np.unique(combined_labels):
-            idx = combined_labels == cluster
-            ax.scatter(combined_pca[idx, 0], combined_pca[idx, 1], label=f"Cluster {cluster}", alpha=0.6)
-        ax.set_title("PCA Cluster Projection (Train + Test)")
-        ax.set_xlabel("PC1")
-        ax.set_ylabel("PC2")
+        all_pca = pca.fit_transform(all_scaled)
+        fig, ax = plt.subplots()
+        for cluster in np.unique(all_labels):
+            ax.scatter(all_pca[all_labels==cluster, 0], all_pca[all_labels==cluster, 1], label=f"Cluster {cluster}")
+        ax.set_title("Clusters via PCA")
         ax.legend()
         st.pyplot(fig)
 
-        # Centroid analysis - display centroid vectors (scaled)
-        st.subheader("🔎 Centroid Feature Analysis")
+        # Centroid Analysis
+        st.markdown("### 🔍 Centroid Analysis")
         centroids_df = pd.DataFrame(centroids, columns=features)
-        st.dataframe(centroids_df)
+        st.dataframe(centroids_df.astype(str))
 
-        # Prepare output for download - combine original data + clusters + predicted values
-        output_train = train_df.copy()
-        output_train['Cluster'] = train_clean['Cluster'].values
-        output_train['Predicted_' + target_column] = train_clean['Predicted'].values
+        # Download output
+        output = pd.concat([
+            train_df.assign(Cluster=labels_train, Predicted=train_clean['Predicted']),
+            test_df.assign(Cluster=labels_test, Predicted=test_clean['Predicted'])
+        ]).sort_index()
 
-        output_test = test_df.copy()
-        output_test['Cluster'] = test_clean['Cluster'].values
-        output_test['Predicted_' + target_column] = test_clean['Predicted'].values
-
-        combined_output = pd.concat([output_train, output_test])
-        combined_output = combined_output.sort_index()
-
-        csv = combined_output.to_csv(index=False).encode('utf-8')
-        st.download_button("📥 Download Full Dataset with Clusters and Predictions", data=csv, file_name="clustered_predictions.csv", mime="text/csv")
+        csv = output.to_csv(index=False).encode('utf-8')
+        st.download_button("📥 Download Results", csv, file_name="hybrid_dnn_eqic_output.csv")
