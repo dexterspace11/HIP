@@ -1,3 +1,5 @@
+# hybrid_dnn_eqic_streamlit.py
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -144,6 +146,7 @@ if uploaded_file:
         train_end = st.number_input("Train End", min_value=min_val, max_value=max_val, value=min_val+10)
         train_df = df[(df[split_column] >= train_start) & (df[split_column] <= train_end)]
         test_df = df[~((df[split_column] >= train_start) & (df[split_column] <= train_end))]
+
     else:
         train_ratio = st.slider("Train ratio", 0.1, 0.9, 0.7)
         split_idx = int(len(df) * train_ratio)
@@ -164,30 +167,31 @@ if uploaded_file:
         train_scaled = scaler.fit_transform(train_clean[features])
         test_scaled = scaler.transform(test_clean[features])
 
-        st.info("Tuning hyperparameters...")
+        st.info("🔍 Tuning hyperparameters...")
         param_grid = {'alpha': [1.0, 2.0], 'beta': [0.3, 0.5], 'gamma': [0.7, 0.9], 'kappa': [0.05, 0.1]}
         _, best_params, score = hyperparameter_search(train_scaled, n_clusters, param_grid)
-        st.success(f"Best Silhouette Score: {score:.4f}")
+        st.success(f"✅ Best Silhouette Score: {score:.4f}")
         st.json(best_params)
 
         labels_train, centroids, weights = enhanced_quantum_clustering(train_scaled, n_clusters, **best_params)
         train_clean['Cluster'] = labels_train
-        labels_test = assign_clusters(test_scaled, centroids, weights, **best_params)
+        labels_test = assign_clusters(test_scaled, centroids, weights,
+                                      alpha=best_params['alpha'], beta=best_params['beta'], gamma=best_params['gamma'])
         test_clean['Cluster'] = labels_test
 
-        # Predict target from cluster assignment
+        # Predict target
         target_type = 'binary' if train_clean[target_column].nunique() == 2 else ('categorical' if train_clean[target_column].dtype == 'O' else 'continuous')
 
         def predict_from_cluster(df):
-            map_func = df.groupby('Cluster')[target_column].mean().to_dict() if target_type in ['binary', 'continuous'] else df.groupby('Cluster')[target_column].agg(lambda x: x.mode().iloc[0] if not x.mode().empty else np.nan).to_dict()
+            mapping = df.groupby('Cluster')[target_column].mean().to_dict() if target_type in ['binary', 'continuous'] else df.groupby('Cluster')[target_column].agg(lambda x: x.mode().iloc[0] if not x.mode().empty else np.nan).to_dict()
             if target_type == 'binary':
-                return [int(map_func[l] > threshold) for l in df['Cluster']]
-            return [map_func.get(l, np.nan) for l in df['Cluster']]
+                return [int(mapping[l] > threshold) for l in df['Cluster']]
+            return [mapping.get(l, np.nan) for l in df['Cluster']]
 
         train_clean['Predicted'] = predict_from_cluster(train_clean)
         test_clean['Predicted'] = predict_from_cluster(test_clean)
 
-        # Evaluation
+        # Metrics
         if target_type == 'binary':
             acc = accuracy_score(train_clean[target_column], train_clean['Predicted'])
             st.metric("Train Accuracy", f"{acc:.2%}")
@@ -195,29 +199,29 @@ if uploaded_file:
             mae = mean_absolute_error(train_clean[target_column], train_clean['Predicted'])
             st.metric("Train MAE", f"{mae:.4f}")
 
-        # PCA
+        # PCA visualization
         st.markdown("### 🧬 PCA Cluster Projection")
-        all_scaled = np.vstack([train_scaled, test_scaled])
-        all_labels = np.concatenate([labels_train, labels_test])
+        combined_scaled = np.vstack([train_scaled, test_scaled])
+        combined_labels = np.concatenate([labels_train, labels_test])
         pca = PCA(n_components=2)
-        all_pca = pca.fit_transform(all_scaled)
+        proj = pca.fit_transform(combined_scaled)
+
         fig, ax = plt.subplots()
-        for cluster in np.unique(all_labels):
-            ax.scatter(all_pca[all_labels==cluster, 0], all_pca[all_labels==cluster, 1], label=f"Cluster {cluster}")
-        ax.set_title("Clusters via PCA")
+        for c in np.unique(combined_labels):
+            ax.scatter(proj[combined_labels==c, 0], proj[combined_labels==c, 1], label=f"Cluster {c}")
+        ax.set_title("Clusters (PCA Projection)")
         ax.legend()
         st.pyplot(fig)
 
-        # Centroid Analysis
-        st.markdown("### 🔍 Centroid Analysis")
-        centroids_df = pd.DataFrame(centroids, columns=features)
-        st.dataframe(centroids_df.astype(str))
+        # Centroids
+        st.markdown("### 🔍 Centroid Feature Vectors")
+        st.dataframe(pd.DataFrame(centroids, columns=features).astype(str))
 
-        # Download output
-        output = pd.concat([
+        # Downloadable output
+        result_df = pd.concat([
             train_df.assign(Cluster=labels_train, Predicted=train_clean['Predicted']),
             test_df.assign(Cluster=labels_test, Predicted=test_clean['Predicted'])
         ]).sort_index()
 
-        csv = output.to_csv(index=False).encode('utf-8')
+        csv = result_df.to_csv(index=False).encode('utf-8')
         st.download_button("📥 Download Results", csv, file_name="hybrid_dnn_eqic_output.csv")
