@@ -1,17 +1,43 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import joblib
-import os
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import silhouette_score
 from sklearn.decomposition import PCA
-from itertools import product
 import matplotlib.pyplot as plt
+from itertools import product
 
-st.set_page_config(layout="wide")
+# ------------- Utility Functions -------------------
 
-# --- Utility Functions ---
+def preprocess_df(df, target_column):
+    df = df.copy()
+
+    # Force object-type columns to strings to avoid pyarrow issues
+    for col in df.select_dtypes(include=['object']).columns:
+        df[col] = df[col].astype(str)
+
+    # Drop datetime columns
+    df = df.drop(columns=df.select_dtypes(include=['datetime64']).columns)
+
+    # Drop constant columns
+    df = df.loc[:, df.nunique() > 1]
+
+    # Drop high-cardinality columns (likely IDs), except target
+    high_card_cols = [col for col in df.columns if df[col].nunique() > 30 and col != target_column]
+    df = df.drop(columns=high_card_cols)
+
+    # One-hot encode categorical (except target)
+    cat_cols = df.select_dtypes(include=['object', 'category']).columns
+    cat_cols = [c for c in cat_cols if c != target_column]
+    df = pd.get_dummies(df, columns=cat_cols, drop_first=True)
+
+    # Fill NaNs with median (exclude target)
+    for col in df.columns:
+        if col != target_column:
+            df[col] = df[col].fillna(df[col].median())
+
+    return df
+
 def normalize_data(data):
     mean = np.mean(data, axis=0)
     std = np.std(data, axis=0)
@@ -39,10 +65,7 @@ def update_dimension_weights(clusters, data):
             mean_var = np.mean(var) if np.mean(var) != 0 else epsilon
             weights *= var / mean_var
     weights = np.nan_to_num(weights, nan=1.0, posinf=1.0, neginf=1.0)
-    sum_weights = np.sum(weights)
-    if sum_weights == 0 or np.isnan(sum_weights):
-        sum_weights = epsilon
-    return weights / sum_weights
+    return weights / np.sum(weights)
 
 def update_centroids(clusters, centroids, gamma, kappa):
     new_centroids = []
@@ -89,133 +112,117 @@ def enhanced_quantum_clustering(data, n_clusters=2, alpha=2.0, beta=0.5, gamma=0
     labels = assign_clusters(data, centroids, weights, alpha, beta, gamma)
     return labels, centroids, weights
 
-def preprocess_df(df, target_column):
-    df = df.copy()
-    # Remove datetime columns
-    df = df.drop(columns=df.select_dtypes(include=['datetime64']).columns)
-    exclude_cols = [target_column]
-    # Drop constant cols
-    constant_cols = [col for col in df.columns if df[col].nunique() <= 1]
-    df = df.drop(columns=constant_cols)
-    # Drop high-cardinality cols (likely IDs)
-    high_card_cols = [col for col in df.columns if df[col].nunique() > 30 and col not in exclude_cols]
-    df = df.drop(columns=high_card_cols)
-    # One-hot encode categorical cols except target
-    cat_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
-    cat_cols = [col for col in cat_cols if col not in exclude_cols]
-    if cat_cols:
-        df = pd.get_dummies(df, columns=cat_cols, drop_first=True)
-    # Fill NaNs with median for features (exclude target)
-    for col in df.columns:
-        if col != target_column:
-            df[col] = df[col].fillna(df[col].median())
-    return df
-
-def print_cluster_analysis(df, features, target_column, pred_column):
-    st.write("### Cluster Analysis")
-    st.write("Cluster-wise mean, std and count:")
-    grouped = df.groupby('Cluster')[features + [target_column, pred_column]].agg(['mean', 'std', 'count'])
-    st.dataframe(grouped)
-    st.write("Correlation matrix (features + target + prediction):")
-    corr = df[features + [target_column, pred_column, 'Cluster']].corr()
-    st.dataframe(corr)
-    st.write("Overall means:")
-    st.write(df[features + [target_column, pred_column, 'Cluster']].mean())
-    st.write("Overall std devs:")
-    st.write(df[features + [target_column, pred_column, 'Cluster']].std())
-    st.write("Cluster counts:")
-    st.write(df['Cluster'].value_counts())
-
-st.title("🔮 Hybrid Quantum-Inspired Clustering & Target Prediction (Single Dataset)")
-
-uploaded_file = st.file_uploader("Upload your combined dataset (Excel or CSV)", type=["csv", "xlsx"])
-
-if uploaded_file:
-    if uploaded_file.name.endswith(".csv"):
-        df = pd.read_csv(uploaded_file)
-    else:
-        df = pd.read_excel(uploaded_file)
-
-    st.write("Dataset Preview:")
-    st.dataframe(df.head())
-
-    target_column = st.selectbox("Select the target variable to predict", df.columns)
-
-    # Detect target type & threshold if binary
-    target_unique = df[target_column].dropna().unique()
-    if df[target_column].dtype == 'O' or len(target_unique) <= 10:
-        if len(target_unique) == 2:
-            target_type = 'binary'
-            threshold = st.slider("Probability threshold for predicting '1'", 0.0, 1.0, 0.5)
-        else:
-            target_type = 'categorical'
-            threshold = None
-    else:
-        target_type = 'continuous'
-        threshold = None
-
-    n_clusters = st.slider("Select number of clusters", 2, 10, 3)
-
-    df_clean = preprocess_df(df, target_column)
-    features = [col for col in df_clean.columns if col != target_column]
-
-    scaler = MinMaxScaler()
-    data_scaled = scaler.fit_transform(df_clean[features])
-
-    param_grid = {
-        'alpha': [1.0, 2.0],
-        'beta': [0.3, 0.5],
-        'gamma': [0.7, 0.9],
-        'kappa': [0.05, 0.1]
-    }
-
-    st.write("Running hyperparameter search...")
+def hyperparameter_search(data, n_clusters, param_grid):
     best_score = -np.inf
     best_params = None
     best_labels = None
     for alpha, beta, gamma, kappa in product(param_grid['alpha'], param_grid['beta'], param_grid['gamma'], param_grid['kappa']):
-        labels, _, _ = enhanced_quantum_clustering(data_scaled, n_clusters, alpha, beta, gamma, kappa)
+        labels, _, _ = enhanced_quantum_clustering(
+            data, n_clusters=n_clusters, alpha=alpha, beta=beta, gamma=gamma, kappa=kappa
+        )
         try:
-            score = silhouette_score(data_scaled, labels)
-            if score > best_score:
-                best_score = score
-                best_params = {'alpha': alpha, 'beta': beta, 'gamma': gamma, 'kappa': kappa}
-                best_labels = labels
+            score = silhouette_score(data, labels)
         except:
-            continue
+            score = -1
+        if score > best_score:
+            best_score = score
+            best_params = {'alpha': alpha, 'beta': beta, 'gamma': gamma, 'kappa': kappa}
+            best_labels = labels
+    return best_labels, best_params, best_score
 
-    st.success(f"Best Silhouette Score: {best_score:.4f}")
-    st.json(best_params)
+# ------------- Streamlit UI -------------------
 
-    labels, centroids, weights = enhanced_quantum_clustering(data_scaled, n_clusters, **best_params)
-    df_clean['Cluster'] = labels
+st.title("🔮 Hybrid Clustering Predictor (Quantum-Inspired)")
+uploaded_file = st.file_uploader("Upload Excel or CSV file", type=["xlsx", "csv"])
 
-    # Map clusters to target & predict
-    if target_type == 'binary':
-        cluster_target_map = df_clean.groupby('Cluster')[target_column].mean().to_dict()
-        df_clean['Predicted'] = [int(cluster_target_map[label] > threshold) for label in labels]
-    elif target_type == 'continuous':
-        cluster_target_map = df_clean.groupby('Cluster')[target_column].mean().to_dict()
-        df_clean['Predicted'] = [cluster_target_map[label] for label in labels]
-    else:  # categorical
-        cluster_target_mode = df_clean.groupby('Cluster')[target_column].agg(lambda x: x.mode().iloc[0] if not x.mode().empty else np.nan)
-        cluster_target_map = cluster_target_mode.to_dict()
-        df_clean['Predicted'] = [cluster_target_mode[label] for label in labels]
+if uploaded_file:
+    if uploaded_file.name.endswith('.csv'):
+        df = pd.read_csv(uploaded_file)
+    else:
+        df = pd.read_excel(uploaded_file)
 
-    st.write("Cluster to target mapping:", cluster_target_map)
+    df.columns = df.columns.astype(str)
+    st.write("Dataset Preview:")
+    st.dataframe(df.astype(str).head())
 
-    print_cluster_analysis(df_clean, features, target_column, 'Predicted')
+    target_column = st.selectbox("Select Target Column to Predict", options=df.columns)
 
-    pca = PCA(n_components=2)
-    data_pca = pca.fit_transform(data_scaled)
-    fig, ax = plt.subplots()
-    for cluster in np.unique(labels):
-        idx = labels == cluster
-        ax.scatter(data_pca[idx, 0], data_pca[idx, 1], label=f'Cluster {cluster}', alpha=0.6)
-    ax.set_title("PCA of Clusters")
-    ax.legend()
-    st.pyplot(fig)
+    if target_column:
+        df_clean = preprocess_df(df, target_column)
+        features = [col for col in df_clean.columns if col != target_column]
 
-    # Download output with predictions
-    csv = df_clean.to_csv(index=False)
-    st.download_button("Download full data with clusters and predictions", csv, "clustered_predictions.csv", "text/csv")
+        # Determine type of target
+        target_unique = df[target_column].dropna().unique()
+        if df[target_column].dtype == 'O' or len(target_unique) <= 10:
+            target_type = 'binary' if len(target_unique) == 2 else 'categorical'
+        else:
+            target_type = 'continuous'
+        st.write(f"Detected target type: `{target_type}`")
+
+        threshold = 0.5
+        if target_type == 'binary':
+            threshold = st.slider("Select Threshold for Binary Prediction", 0.0, 1.0, 0.5)
+
+        # Scaling
+        scaler = MinMaxScaler()
+        data_scaled = scaler.fit_transform(df_clean[features])
+
+        # Hyperparameter tuning
+        param_grid = {
+            'alpha': [1.0, 2.0],
+            'beta': [0.3, 0.5],
+            'gamma': [0.7, 0.9],
+            'kappa': [0.05, 0.1]
+        }
+
+        st.info("⏳ Searching for best hyperparameters...")
+        labels, best_params, best_score = hyperparameter_search(data_scaled, n_clusters=st.slider("Number of Clusters", 2, 6, 3), param_grid=param_grid)
+        st.success(f"✅ Best Silhouette Score: {best_score:.4f}")
+        st.json(best_params)
+
+        # Final clustering
+        labels, centroids, weights = enhanced_quantum_clustering(data_scaled, n_clusters=len(set(labels)), **best_params)
+        df_clean["Cluster"] = labels
+
+        # Cluster-to-target mapping
+        if target_type == 'binary':
+            cluster_map = df_clean.groupby('Cluster')[target_column].mean().to_dict()
+            df_clean['Predicted'] = [int(cluster_map[l] > threshold) for l in labels]
+        elif target_type == 'continuous':
+            cluster_map = df_clean.groupby('Cluster')[target_column].mean().to_dict()
+            df_clean['Predicted'] = [cluster_map[l] for l in labels]
+        else:
+            cluster_map = df_clean.groupby('Cluster')[target_column].agg(lambda x: x.mode().iloc[0] if not x.mode().empty else np.nan).to_dict()
+            df_clean['Predicted'] = [cluster_map[l] for l in labels]
+
+        st.subheader("📊 Cluster Analysis")
+        st.write("Cluster Mean/Std:")
+        st.dataframe(df_clean.groupby('Cluster')[features + ['Predicted']].agg(['mean', 'std']))
+
+        st.write("Cluster Counts:")
+        st.dataframe(df_clean['Cluster'].value_counts().rename("Count"))
+
+        # PCA plot
+        try:
+            st.subheader("🌀 PCA Cluster Plot")
+            pca = PCA(n_components=2)
+            data_pca = pca.fit_transform(data_scaled)
+            fig, ax = plt.subplots(figsize=(8, 6))
+            for cluster in np.unique(labels):
+                idx = labels == cluster
+                ax.scatter(data_pca[idx, 0], data_pca[idx, 1], label=f"Cluster {cluster}", alpha=0.6)
+            ax.set_title("PCA Projection of Clusters")
+            ax.set_xlabel("PC 1")
+            ax.set_ylabel("PC 2")
+            ax.legend()
+            st.pyplot(fig)
+        except Exception as e:
+            st.warning(f"PCA plot not available: {e}")
+
+        st.subheader("🔍 Final Output")
+        st.dataframe(df_clean[[target_column, 'Cluster', 'Predicted'] + features].astype(str).head(10))
+
+        # Downloadable
+        csv = df_clean.to_csv(index=False).encode('utf-8')
+        st.download_button("📥 Download Results as CSV", data=csv, file_name="cluster_predictions.csv", mime="text/csv")
+
