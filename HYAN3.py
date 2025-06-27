@@ -1,5 +1,3 @@
-# hybrid_dnn_eqic_streamlit.py
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -15,34 +13,40 @@ warnings.filterwarnings("ignore")
 
 # -------------------- Utility Functions --------------------
 
-def preprocess_df_safe(df, target_column=None):
+def preprocess_df(df, target_column=None):
     df = df.copy()
 
-    # Remove datetime columns
-    df = df.drop(columns=df.select_dtypes(include=["datetime64", "datetime"]).columns, errors="ignore")
+    # Drop datetime columns
+    df = df.drop(columns=df.select_dtypes(include=['datetime64']).columns)
 
     # Drop columns with only one unique value
-    df = df.loc[:, df.nunique(dropna=False) > 1]
+    df = df.loc[:, df.nunique() > 1]
 
-    # Fill missing values early
-    for col in df.columns:
-        if df[col].dtype in [np.float64, np.int64]:
-            df[col] = df[col].fillna(df[col].median())
-        else:
-            df[col] = df[col].fillna("unknown")
+    # Convert object columns to strings
+    for col in df.select_dtypes(include=['object']).columns:
+        df[col] = df[col].astype(str)
 
-    # One-hot encode categoricals (excluding the target)
-    cat_cols = df.select_dtypes(include=["object", "category"]).columns
+    # Drop high-cardinality features
+    high_card_cols = [col for col in df.columns if df[col].nunique() > 30 and col != target_column]
+    df = df.drop(columns=high_card_cols)
+
+    # One-hot encode categoricals
+    cat_cols = df.select_dtypes(include=['object', 'category']).columns
     cat_cols = [c for c in cat_cols if c != target_column]
     df = pd.get_dummies(df, columns=cat_cols, drop_first=True)
 
-    # Drop target column if present
-    if target_column:
-        df = df.drop(columns=[target_column], errors='ignore')
+    # Fill missing values
+    for col in df.columns:
+        if col != target_column:
+            df[col] = df[col].fillna(df[col].median())
 
-    # Final sanity check
-    if df.shape[1] == 0:
-        raise ValueError("\u26a0\ufe0f No features available for clustering after preprocessing. Check your dataset and target column.")
+    if target_column and target_column not in df.columns:
+        return None  # Safety check
+
+    # Remove the target if specified, then check if any features are left
+    feature_cols = [c for c in df.columns if c != target_column] if target_column else df.columns
+    if len(feature_cols) == 0:
+        return None
 
     return df
 
@@ -104,13 +108,13 @@ def enhanced_quantum_clustering(data, n_clusters=2, alpha=2.0, beta=0.5, gamma=0
     centroids = data[idx]
     weights = np.ones(data.shape[1])
 
-    for it in range(max_iter):
+    for _ in range(max_iter):
         clusters = [[] for _ in range(n_clusters)]
         for x in data:
             dists = [calculate_distance(x, c, alpha, beta, gamma, weights) for c in centroids]
             clusters[np.argmax(dists)].append(x)
 
-        if it > 0:
+        if _ > 0:
             weights = update_dimension_weights(clusters, data)
 
         new_centroids = update_centroids(clusters, centroids, gamma, kappa)
@@ -142,82 +146,78 @@ def hyperparameter_search(data, n_clusters, param_grid):
 # -------------------- Streamlit UI --------------------
 
 st.set_page_config(page_title="Hybrid DNN-EQIC Clustering", layout="wide")
-st.title("\U0001f9e0 Hybrid DNN-EQIC Clustering and Prediction (Quantum-Inspired)")
+st.title("Hybrid DNN-EQIC Clustering and Prediction")
 
-uploaded_file = st.file_uploader("\U0001f4e4 Upload your dataset (CSV/XLSX)", type=["csv", "xlsx"])
+uploaded_file = st.file_uploader("Upload your dataset (CSV or Excel)", type=["csv", "xlsx"])
 
 if uploaded_file:
     df = pd.read_csv(uploaded_file) if uploaded_file.name.endswith(".csv") else pd.read_excel(uploaded_file)
     df.columns = df.columns.astype(str)
-    st.dataframe(df.head().astype(str))
+    st.dataframe(df.head())
 
-    st.markdown("### \u2699\ufe0f Train/Test Configuration")
     train_ratio = st.slider("Train Ratio", 0.1, 0.9, 0.7)
     split_idx = int(len(df) * train_ratio)
-    train_df = df.iloc[:split_idx]
+    train_df, test_df = df.iloc[:split_idx], df.iloc[split_idx:]
 
-    st.markdown("### \ud83c\udfaf Clustering Setup")
-    target_column = st.selectbox("Select target column (optional, for evaluation only)", ["None"] + list(df.columns))
+    st.subheader("Clustering Setup")
+    target_column = st.selectbox("Select target column (optional, for accuracy evaluation only)", ["None"] + list(df.columns))
     target_column = None if target_column == "None" else target_column
+
     threshold = st.slider("Binary threshold (if applicable)", 0.0, 1.0, 0.5)
     n_clusters = st.slider("Number of clusters", 2, 10, 3)
 
-    if st.button("\ud83d\ude80 Start Clustering"):
-        try:
-            train_clean = preprocess_df_safe(train_df, target_column)
-        except ValueError as e:
-            st.error(str(e))
-            st.stop()
+    if st.button("Start Clustering"):
+        train_clean = preprocess_df(train_df, target_column)
+        if train_clean is None or train_clean.empty:
+            st.error("No features available for clustering after preprocessing. Please check your dataset.")
+        else:
+            features = [col for col in train_clean.columns if col != target_column] if target_column else train_clean.columns
+            scaler = MinMaxScaler()
+            train_scaled = scaler.fit_transform(train_clean[features])
 
-        features = train_clean.columns
-        scaler = MinMaxScaler()
-        train_scaled = scaler.fit_transform(train_clean[features])
+            st.info("Tuning hyperparameters...")
+            param_grid = {'alpha': [1.0, 2.0], 'beta': [0.3, 0.5], 'gamma': [0.7, 0.9], 'kappa': [0.05, 0.1]}
+            _, best_params, sil_score = hyperparameter_search(train_scaled, n_clusters, param_grid)
+            st.success(f"Best Silhouette Score: {sil_score:.4f}")
+            st.json(best_params)
 
-        st.info("\ud83d\udd0d Hyperparameter tuning in progress...")
-        param_grid = {'alpha': [1.0, 2.0], 'beta': [0.3, 0.5], 'gamma': [0.7, 0.9], 'kappa': [0.05, 0.1]}
-        _, best_params, sil_score = hyperparameter_search(train_scaled, n_clusters, param_grid)
-        st.success(f"\u2705 Silhouette Score: {sil_score:.4f}")
-        st.json(best_params)
+            labels, centroids, weights = enhanced_quantum_clustering(train_scaled, n_clusters, **best_params)
+            train_clean['Cluster'] = labels
 
-        labels, centroids, weights = enhanced_quantum_clustering(train_scaled, n_clusters, **best_params)
-        train_clean['Cluster'] = labels
+            st.subheader("Clustering Metrics")
+            st.write(f"Calinski-Harabasz Score: {calinski_harabasz_score(train_scaled, labels):.2f}")
+            st.write(f"Davies-Bouldin Score: {davies_bouldin_score(train_scaled, labels):.2f}")
 
-        st.markdown("### \ud83d\udcc8 Additional Clustering Metrics")
-        st.write(f"Calinski-Harabasz Score: {calinski_harabasz_score(train_scaled, labels):.2f}")
-        st.write(f"Davies-Bouldin Score: {davies_bouldin_score(train_scaled, labels):.2f}")
+            if target_column:
+                if train_clean[target_column].nunique() <= 10:
+                    cluster_map = train_clean.groupby('Cluster')[target_column].agg(lambda x: x.mode().iloc[0]).to_dict()
+                    train_clean['Predicted'] = [cluster_map.get(l, np.nan) for l in labels]
+                    acc = accuracy_score(train_clean[target_column], train_clean['Predicted'])
+                    st.metric("Cluster Match Accuracy", f"{acc:.2%}")
 
-        if target_column:
-            if train_df[target_column].nunique() <= 10:
-                cluster_map = train_df.groupby('Cluster')[target_column].agg(lambda x: x.mode().iloc[0]).to_dict()
-                train_df['Predicted'] = [cluster_map.get(l, np.nan) for l in labels]
-                acc = accuracy_score(train_df[target_column], train_df['Predicted'])
-                st.metric("Cluster Match Accuracy", f"{acc:.2%}")
-
-        st.markdown("### \ud83e\uddae PCA / t-SNE Visualization")
-        tab1, tab2 = st.tabs(["PCA", "t-SNE"])
-
-        with tab1:
+            st.subheader("PCA Projection")
             pca = PCA(n_components=2)
             proj = pca.fit_transform(train_scaled)
-            fig, ax = plt.subplots()
+            fig1, ax1 = plt.subplots()
             for c in np.unique(labels):
-                ax.scatter(proj[labels == c, 0], proj[labels == c, 1], label=f"Cluster {c}", alpha=0.6)
-            ax.set_title("PCA Cluster Projection")
-            ax.legend()
-            st.pyplot(fig)
+                ax1.scatter(proj[labels == c, 0], proj[labels == c, 1], label=f"Cluster {c}", alpha=0.6)
+            ax1.set_title("PCA Cluster Projection")
+            ax1.legend()
+            st.pyplot(fig1)
 
-        with tab2:
+            st.subheader("t-SNE Projection")
             tsne = TSNE(n_components=2, perplexity=30, n_iter=500)
             tsne_proj = tsne.fit_transform(train_scaled)
-            fig, ax = plt.subplots()
+            fig2, ax2 = plt.subplots()
             for c in np.unique(labels):
-                ax.scatter(tsne_proj[labels == c, 0], tsne_proj[labels == c, 1], label=f"Cluster {c}", alpha=0.6)
-            ax.set_title("t-SNE Cluster Projection")
-            ax.legend()
-            st.pyplot(fig)
+                ax2.scatter(tsne_proj[labels == c, 0], tsne_proj[labels == c, 1], label=f"Cluster {c}", alpha=0.6)
+            ax2.set_title("t-SNE Cluster Projection")
+            ax2.legend()
+            st.pyplot(fig2)
 
-        st.markdown("### \ud83d\udd0d Cluster Centroids")
-        st.dataframe(pd.DataFrame(centroids, columns=features).astype(str))
+            st.subheader("Cluster Centroids")
+            st.dataframe(pd.DataFrame(centroids, columns=features).astype(str))
 
-        csv = train_df.assign(Cluster=labels).to_csv(index=False).encode('utf-8')
-        st.download_button("\ud83d\udcc5 Download Clustered Data", csv, file_name="clustered_output.csv")
+            result = pd.concat([train_df.reset_index(drop=True), train_clean[['Cluster']]], axis=1)
+            csv = result.to_csv(index=False, encoding="utf-8-sig")
+            st.download_button("Download Clustered Data", csv, file_name="clustered_output.csv")
