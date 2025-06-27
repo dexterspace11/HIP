@@ -94,6 +94,28 @@ def enhanced_quantum_clustering(data, n_clusters=2, alpha=2.0, beta=0.5, gamma=0
 st.title("🔮 Hybrid Quantum-Inspired Clustering & Prediction")
 mode = st.sidebar.radio("Choose Mode", ["Train Model", "Predict New Data"])
 
+def preprocess_df(df, target_column=None):
+    df = df.copy()
+    df = df.drop(columns=df.select_dtypes(include=['datetime64']).columns)
+    if target_column:
+        exclude_cols = [target_column]
+    else:
+        exclude_cols = []
+    constant_cols = [col for col in df.columns if df[col].nunique() <= 1]
+    df = df.drop(columns=constant_cols)
+    high_card_cols = [col for col in df.columns if df[col].nunique() > 30 and col not in exclude_cols]
+    df = df.drop(columns=high_card_cols)
+
+    cat_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
+    cat_cols = [col for col in cat_cols if col not in exclude_cols]
+    if cat_cols:
+        df = pd.get_dummies(df, columns=cat_cols, drop_first=True)
+
+    for col in df.columns:
+        if col not in exclude_cols:
+            df[col] = df[col].fillna(df[col].median())
+    return df
+
 if mode == "Train Model":
     st.subheader("🧪 Train Clustering Model")
     uploaded_file = st.file_uploader("Upload training Excel or CSV", type=["csv", "xlsx"])
@@ -108,16 +130,13 @@ if mode == "Train Model":
         target_column = st.selectbox("Select target column to predict", df.columns)
         n_clusters = st.slider("Number of Clusters", 2, 10, 3)
 
-        features = [col for col in df.columns if col != target_column and df[col].nunique() > 1]
-        df = df[features + [target_column]]
-        for col in features:
-            df[col] = df[col].fillna(df[col].median())
-
         target_type = "binary" if df[target_column].nunique() == 2 else "continuous"
         threshold = 0.5 if target_type == "binary" else None
 
+        df_clean = preprocess_df(df, target_column)
+        features = [col for col in df_clean.columns if col != target_column]
         scaler = MinMaxScaler()
-        data_scaled = scaler.fit_transform(df[features])
+        data_scaled = scaler.fit_transform(df_clean[features])
 
         param_grid = {
             'alpha': [1.0, 2.0],
@@ -145,14 +164,14 @@ if mode == "Train Model":
         st.json(best_params)
 
         labels, centroids, weights = enhanced_quantum_clustering(data_scaled, n_clusters, **best_params)
-        df['Cluster'] = labels
+        df_clean['Cluster'] = labels
 
         if target_type == 'binary':
-            cluster_target_map = df.groupby('Cluster')[target_column].mean().to_dict()
-            df['Predicted'] = [int(cluster_target_map[label] > threshold) for label in labels]
+            cluster_target_map = df_clean.groupby('Cluster')[target_column].mean().to_dict()
+            df_clean['Predicted'] = [int(cluster_target_map[label] > threshold) for label in labels]
         else:
-            cluster_target_map = df.groupby('Cluster')[target_column].mean().to_dict()
-            df['Predicted'] = [cluster_target_map[label] for label in labels]
+            cluster_target_map = df_clean.groupby('Cluster')[target_column].mean().to_dict()
+            df_clean['Predicted'] = [cluster_target_map[label] for label in labels]
 
         model = {
             'centroids': centroids,
@@ -200,10 +219,10 @@ elif mode == "Predict New Data":
         else:
             df_new = pd.read_excel(uploaded_file)
 
+        df_new = preprocess_df(df_new)
         for col in features:
             if col not in df_new.columns:
                 df_new[col] = 0
-            df_new[col] = df_new[col].fillna(df_new[col].median())
 
         data_scaled = scaler.transform(df_new[features])
         labels = assign_clusters(data_scaled, centroids, weights, **best_params)
