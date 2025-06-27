@@ -89,10 +89,6 @@ def enhanced_quantum_clustering(data, n_clusters=2, alpha=2.0, beta=0.5, gamma=0
     labels = assign_clusters(data, centroids, weights, alpha, beta, gamma)
     return labels, centroids, weights
 
-# --- Streamlit UI ---
-st.title("🔮 Hybrid Quantum-Inspired Clustering & Prediction")
-mode = st.sidebar.radio("Choose Mode", ["Train Model", "Predict New Data"])
-
 def preprocess_df(df, target_column=None):
     df = df.copy()
     df = df.drop(columns=df.select_dtypes(include=['datetime64']).columns)
@@ -117,20 +113,38 @@ def preprocess_df(df, target_column=None):
             df[col] = df[col].fillna(df[col].median())
     return df
 
+def print_cluster_analysis(df, features, target_column, pred_column):
+    st.write("### Cluster Analysis")
+    st.write("Cluster-wise mean, std and count:")
+    grouped = df.groupby('Cluster')[features + [target_column, pred_column]].agg(['mean', 'std', 'count'])
+    st.dataframe(grouped)
+    st.write("Correlation matrix (features + target + prediction):")
+    corr = df[features + [target_column, pred_column, 'Cluster']].corr()
+    st.dataframe(corr)
+    st.write("Overall means:")
+    st.write(df[features + [target_column, pred_column, 'Cluster']].mean())
+    st.write("Overall std devs:")
+    st.write(df[features + [target_column, pred_column, 'Cluster']].std())
+    st.write("Cluster counts:")
+    st.write(df['Cluster'].value_counts())
+
+st.title("🔮 Hybrid Quantum-Inspired Clustering & Prediction")
+
+mode = st.sidebar.radio("Choose Mode", ["Train Model", "Predict New Data"])
+
 if mode == "Train Model":
     st.subheader("🧪 Train Clustering Model")
-    uploaded_file = st.file_uploader("Upload training Excel or CSV", type=["csv", "xlsx"])
-    
+    uploaded_file = st.file_uploader("Upload training Excel or CSV file", type=["csv", "xlsx"])
     if uploaded_file:
         if uploaded_file.name.endswith(".csv"):
             df = pd.read_csv(uploaded_file)
         else:
             df = pd.read_excel(uploaded_file)
-        st.write("Data Preview", df.head())
-
-        target_column = st.selectbox("Select target column to predict", df.columns)
+        st.write("Data Preview:", df.head())
+        target_column = st.selectbox("Select the target column to predict", df.columns)
         n_clusters = st.slider("Number of Clusters", 2, 10, 3)
 
+        # Detect target type & threshold if binary
         target_unique = df[target_column].dropna().unique()
         if df[target_column].dtype == 'O' or len(target_unique) <= 10:
             if len(target_unique) == 2:
@@ -203,6 +217,9 @@ if mode == "Train Model":
         joblib.dump(model, "models/saved_model.joblib")
         st.success("Model saved to models/saved_model.joblib")
 
+        # Show cluster analysis
+        print_cluster_analysis(df_clean, features, target_column, 'Predicted')
+
         # Show PCA
         pca = PCA(n_components=2)
         data_pca = pca.fit_transform(data_scaled)
@@ -217,56 +234,63 @@ if mode == "Train Model":
 elif mode == "Predict New Data":
     st.subheader("🔮 Predict Using Saved Model")
     uploaded_file = st.file_uploader("Upload new data file", type=["csv", "xlsx"])
-    
-    if uploaded_file and os.path.exists("models/saved_model.joblib"):
-        model = joblib.load("models/saved_model.joblib")
-        centroids = model['centroids']
-        weights = model['weights']
-        scaler = model['scaler']
-        features = model['features']
-        best_params = model['best_params']
-        cluster_target_map = model['cluster_target_map']
-        target_type = model['target_type']
-        threshold = model.get('threshold', 0.5)
-
-        if uploaded_file.name.endswith(".csv"):
-            df_new = pd.read_csv(uploaded_file)
+    if uploaded_file:
+        model_path = "models/saved_model.joblib"
+        if not os.path.exists(model_path):
+            st.warning("Model not found. Please train and save a model first.")
         else:
-            df_new = pd.read_excel(uploaded_file)
+            model = joblib.load(model_path)
+            centroids = model['centroids']
+            weights = model['weights']
+            scaler = model['scaler']
+            features = model['features']
+            best_params = model['best_params']
+            cluster_target_map = model['cluster_target_map']
+            target_type = model['target_type']
+            threshold = model.get('threshold', 0.5)
 
-        df_new = df_new.drop(columns=df_new.select_dtypes(include=['datetime64']).columns)
-        # One-hot encode categorical cols in new data if any
-        cat_cols = df_new.select_dtypes(include=['object', 'category']).columns.tolist()
-        if cat_cols:
-            df_new = pd.get_dummies(df_new, columns=cat_cols, drop_first=True)
-        for col in features:
-            if col not in df_new.columns:
-                df_new[col] = 0
+            if uploaded_file.name.endswith(".csv"):
+                df_new = pd.read_csv(uploaded_file)
+            else:
+                df_new = pd.read_excel(uploaded_file)
 
-        # Fill missing numeric cols with median
-        for col in features:
-            df_new[col] = df_new[col].fillna(df_new[col].median())
+            # Ask user for target column in new data (optional)
+            target_column = st.selectbox("Select the target column in new data (optional, for analysis)", options=[None]+list(df_new.columns))
+            # Drop datetime
+            df_new = df_new.drop(columns=df_new.select_dtypes(include=['datetime64']).columns)
+            # One-hot encode categorical cols
+            cat_cols = df_new.select_dtypes(include=['object', 'category']).columns.tolist()
+            if cat_cols:
+                df_new = pd.get_dummies(df_new, columns=cat_cols, drop_first=True)
+            for col in features:
+                if col not in df_new.columns:
+                    df_new[col] = 0
 
-        data_scaled = scaler.transform(df_new[features])
-        # Fix: pass only alpha, beta, gamma to assign_clusters
-        labels = assign_clusters(
-            data_scaled,
-            centroids,
-            weights,
-            best_params['alpha'],
-            best_params['beta'],
-            best_params['gamma']
-        )
-        df_new['Cluster'] = labels
+            for col in features:
+                df_new[col] = df_new[col].fillna(df_new[col].median())
 
-        def predict_target(cluster_label):
-            val = cluster_target_map.get(cluster_label, np.nan)
-            if target_type == 'binary':
-                return int(val > threshold)
-            return val
+            data_scaled = scaler.transform(df_new[features])
 
-        df_new['Predicted'] = df_new['Cluster'].apply(predict_target)
-        st.write("Prediction Preview", df_new.head())
-        st.download_button("Download Predictions", df_new.to_csv(index=False), "predictions.csv", "text/csv")
-    elif not os.path.exists("models/saved_model.joblib"):
-        st.warning("Please train and save a model first.")
+            labels = assign_clusters(
+                data_scaled,
+                centroids,
+                weights,
+                best_params['alpha'],
+                best_params['beta'],
+                best_params['gamma']
+            )
+            df_new['Cluster'] = labels
+
+            def predict_target(cluster_label):
+                val = cluster_target_map.get(cluster_label, np.nan)
+                if target_type == 'binary':
+                    return int(val > threshold)
+                return val
+
+            df_new['Predicted'] = df_new['Cluster'].apply(predict_target)
+            st.write("Prediction Preview:", df_new.head())
+
+            if target_column:
+                print_cluster_analysis(df_new, features, target_column, 'Predicted')
+
+            st.download_button("Download Predictions CSV", df_new.to_csv(index=False), "predictions.csv", "text/csv")
